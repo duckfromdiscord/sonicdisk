@@ -1,5 +1,8 @@
 mod path;
 mod security;
+mod subsonic;
+
+use crate::subsonic::SubsonicInfo;
 
 use std::{
 	borrow::Borrow,
@@ -31,6 +34,9 @@ use winapi::{
 };
 
 use crate::{path::FullName, security::SecurityDescriptor};
+
+
+
 
 #[derive(Debug)]
 struct AltStream {
@@ -390,13 +396,14 @@ impl Drop for EntryHandle {
 }
 
 #[derive(Debug)]
-struct MemFsHandler {
+struct SubFSHandler {
 	id_counter: AtomicU64,
 	root: Arc<DirEntry>,
+	info: SubsonicInfo,
 }
 
-impl MemFsHandler {
-	fn new() -> Self {
+impl SubFSHandler {
+	fn new(info: SubsonicInfo) -> Self {
 		Self {
 			id_counter: AtomicU64::new(1),
 			root: Arc::new(DirEntry::new(Stat::new(
@@ -405,6 +412,7 @@ impl MemFsHandler {
 				SecurityDescriptor::new_default().unwrap(),
 				Weak::new(),
 			))),
+			info,
 		}
 	}
 
@@ -479,7 +487,7 @@ fn ignore_name_too_long(err: FillDataError) -> OperationResult<()> {
 	}
 }
 
-impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
+impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	type Context = EntryHandle;
 
 	fn create_file(
@@ -1303,7 +1311,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let matches = App::new("dokan-rust memfs example")
+	let matches = App::new("SonicDisk")
 		.author(env!("CARGO_PKG_AUTHORS"))
 		.arg(
 			Arg::with_name("mount_point")
@@ -1315,26 +1323,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 				.help("Mount point path."),
 		)
 		.arg(
+			Arg::with_name("username")
+			.short("u")
+			.long("username")
+			.takes_value(true)
+			.value_name("USERNAME")
+			.required(true)
+			.help("Subsonic server username")
+		).arg(
+			Arg::with_name("password")
+			.short("p")
+			.long("password")
+			.takes_value(true)
+			.value_name("PASSWORD")
+			.required(true)
+			.help("Subsonic server password")
+		)
+		.arg(
+			Arg::with_name("url")
+			.short("l")
+			.long("url")
+			.takes_value(true)
+			.value_name("URL")
+			.required(true)
+			.help("Subsonic server url")
+		)
+		.arg(
 			Arg::with_name("single_thread")
 				.short("t")
 				.long("single-thread")
 				.help("Force a single thread. Otherwise Dokan will allocate the number of threads regarding the workload."),
 		)
-		.arg(
-			Arg::with_name("dokan_debug")
-				.short("d")
-				.long("dokan-debug")
-				.help("Enable Dokan's debug output."),
-		)
-		.arg(
-			Arg::with_name("removable")
-				.short("r")
-				.long("removable")
-				.help("Mount as a removable drive."),
-		)
 		.get_matches();
-
+	
 	let mount_point = U16CString::from_str(matches.value_of("mount_point").unwrap())?;
+	
+	let client: sunk::Client = subsonic::client(matches.value_of("url").unwrap(), matches.value_of("username").unwrap(), matches.value_of("password").unwrap());
+
+	dbg!(client.music_folders().unwrap());
 
 	let mut flags = MountFlags::ALT_STREAM;
 	if matches.is_present("dokan_debug") {
@@ -1350,7 +1376,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		..Default::default()
 	};
 
-	let handler = MemFsHandler::new();
+	let info = SubsonicInfo::new(client);
+
+	dbg!(info.desired_folders.clone());
+	let handler = SubFSHandler::new(info);
 
 	init();
 
