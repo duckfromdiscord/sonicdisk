@@ -10,11 +10,29 @@ pub fn client(site: &str, username: &str, password: &str) -> Client {
 pub struct IdentifiedSong {
     pub song: String,
     pub song_id: String,
+    pub format: String,
 }
 
 impl PartialEq for IdentifiedSong {
     fn eq(&self, rhs: &IdentifiedSong) -> bool { 
         return self.song_id == rhs.song_id;
+    }
+}
+
+impl IdentifiedSong {
+    pub fn get_filename(&self) -> String {
+        let extension = match self.format.as_str() {
+            "audio/x-flac" => {
+                ".flac"
+            },
+            "audio/mpeg" => {
+                ".mp3"
+            },
+            _ => {
+                ""
+            }
+        };
+        return self.song.clone() + extension;
     }
 }
 
@@ -52,7 +70,7 @@ fn get_albums(client: &Client) -> Result<Vec<Album>, sunk::Error> {
 fn songvec_to_identifiedsongvec(songvec: Vec<Song>) -> Vec<IdentifiedSong> {
     let mut ret: Vec<IdentifiedSong> = Vec::new();
     for song in songvec {
-        ret.push(IdentifiedSong { song: song.title.clone(), song_id: song.id.to_string() });
+        ret.push(IdentifiedSong { song: song.title.clone(), song_id: song.id.to_string(), format: song.content_type.clone() });
     }
     ret
 }

@@ -922,7 +922,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 											data: vec![].into(),
 										};
 										let gen_entry: Entry = Entry::File(song_file_entry.into());
-										let entry_name: EntryName = EntryName(song.clone().song.into());
+										let entry_name: EntryName = EntryName(song.get_filename().into());
 										children.insert(entry_name, gen_entry);
 									}
 								}
@@ -1469,7 +1469,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	let info = SubsonicInfo::new(client);
 
-	dbg!(info.desired_folders.clone());
 	let handler = SubFSHandler::new(info);
 
 	init();
