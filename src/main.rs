@@ -2,7 +2,7 @@ mod path;
 mod security;
 mod subsonic;
 
-use crate::subsonic::SubsonicInfo;
+use crate::subsonic::{SubsonicInfo, IdentifiedSong};
 
 use std::{
 	borrow::Borrow,
@@ -534,20 +534,44 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 					});
 				} else {
 					for album in albums {
-						if file_name.to_string().unwrap() == format!("\\{}\\{}", artist.artist, album.album).to_string() {
-							let album_dir_entry: DirEntry = DirEntry {
-								stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), 
-								children: HashMap::new().into(),
-							};
-							return Ok(CreateFileInfo {
-								context: EntryHandle::new(
-									Entry::Directory(album_dir_entry.into()),
-									None,
-									false,
-								),
-								is_dir: true,
-								new_file_created: false,
-							});
+						if file_name.to_string().unwrap().starts_with(&format!("\\{}\\{}", artist.artist, album.album).to_string()) {
+							let songs: Vec<IdentifiedSong> = album.songs.clone();
+							if file_name.to_string().unwrap() == format!("\\{}\\{}", artist.artist, album.album).to_string() {
+								// looking at album folder
+								let album_dir_entry: DirEntry = DirEntry {
+									stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), 
+									children: HashMap::new().into(),
+								};
+								return Ok(CreateFileInfo {
+									context: EntryHandle::new(
+										Entry::Directory(album_dir_entry.into()),
+										None,
+										false,
+									),
+									is_dir: true,
+									new_file_created: false,
+								});
+							} else {
+								// getting song
+								for song in songs {
+									if file_name.to_string().unwrap() == format!("\\{}\\{}\\{}", artist.artist, album.album, song.get_filename()).to_string() {
+										let song_file_entry: FileEntry = FileEntry {
+											stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), 
+											data: vec![].into(),
+										};
+										return Ok(CreateFileInfo {
+											context: EntryHandle::new(
+												Entry::File(song_file_entry.into()),
+												None,
+												false,
+											),
+											is_dir: false,
+											new_file_created: false,
+										});
+									}
+								}
+							}
+							
 						}
 					}
 				}
