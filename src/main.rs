@@ -5,6 +5,7 @@ use std::{
 	borrow::Borrow,
 	collections::HashMap,
 	hash::{Hash, Hasher},
+	os::windows::io::AsRawHandle,
 	sync::{
 		atomic::{AtomicBool, AtomicU64, Ordering},
 		Arc, Mutex, RwLock, Weak,
@@ -19,13 +20,14 @@ use dokan::{
 	MountFlags, MountOptions, OperationInfo, OperationResult, VolumeInfo, IO_SECURITY_CONTEXT,
 };
 use dokan_sys::win32::{
-	FILE_DELETE_ON_CLOSE,  FILE_MAXIMUM_DISPOSITION,
-	FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, 
+	FILE_CREATE, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_MAXIMUM_DISPOSITION,
+	FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OVERWRITE, FILE_OVERWRITE_IF,
+	FILE_SUPERSEDE,
 };
 use widestring::{U16CStr, U16CString, U16Str, U16String};
 use winapi::{
 	shared::{ntdef, ntstatus::*},
-	um::{winnt, processthreadsapi::OpenProcessToken},
+	um::winnt,
 };
 
 use crate::{path::FullName, security::SecurityDescriptor};
@@ -491,14 +493,188 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		create_options: u32,
 		info: &mut OperationInfo<'c, 'h, Self>,
 	) -> OperationResult<CreateFileInfo<Self::Context>> {
+		if (file_name.to_string().unwrap() == "\\test.mp3") {
+			let our_file_entry: FileEntry = FileEntry { stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), data: include_bytes!("test.mp3").to_vec().into() };
+
+			return Ok(CreateFileInfo {
+				context: EntryHandle::new(
+					Entry::File(our_file_entry.into()),
+					None,
+					false,
+				),
+				is_dir: false,
+				new_file_created: false,
+			});
+		}
+
 		if create_disposition > FILE_MAXIMUM_DISPOSITION {
 			return Err(STATUS_INVALID_PARAMETER);
 		}
 		let delete_on_close = create_options & FILE_DELETE_ON_CLOSE > 0;
 		let path_info = path::split_path(&self.root, file_name)?;
 		if let Some((name, parent)) = path_info {
-			Err(STATUS_ACCESS_DENIED)
-			// you can't add a file to a subsonic server
+			let mut children = parent.children.write().unwrap();
+			if let Some(entry) = children.get(EntryNameRef::new(name.file_name)) {
+				let stat = entry.stat().read().unwrap();
+				let is_readonly = stat.attrs.value & winnt::FILE_ATTRIBUTE_READONLY > 0;
+				let is_hidden_system = stat.attrs.value & winnt::FILE_ATTRIBUTE_HIDDEN > 0
+					&& stat.attrs.value & winnt::FILE_ATTRIBUTE_SYSTEM > 0
+					&& !(file_attributes & winnt::FILE_ATTRIBUTE_HIDDEN > 0
+						&& file_attributes & winnt::FILE_ATTRIBUTE_SYSTEM > 0);
+				if is_readonly
+					&& (desired_access & winnt::FILE_WRITE_DATA > 0
+						|| desired_access & winnt::FILE_APPEND_DATA > 0)
+				{
+					return Err(STATUS_ACCESS_DENIED);
+				}
+				if stat.delete_pending {
+					return Err(STATUS_DELETE_PENDING);
+				}
+				if is_readonly && delete_on_close {
+					return Err(STATUS_CANNOT_DELETE);
+				}
+				std::mem::drop(stat);
+				let ret = if let Some(stream_info) = &name.stream_info {
+					if stream_info.check_default(entry.is_dir())? {
+						None
+					} else {
+						let mut stat = entry.stat().write().unwrap();
+						let stream_name = EntryNameRef::new(stream_info.name);
+						if let Some(stream) =
+							stat.alt_streams.get(stream_name).map(|s| Arc::clone(s))
+						{
+							if stream.read().unwrap().delete_pending {
+								return Err(STATUS_DELETE_PENDING);
+							}
+							match create_disposition {
+								FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF => {
+									if create_disposition != FILE_SUPERSEDE && is_readonly {
+										return Err(STATUS_ACCESS_DENIED);
+									}
+									stat.attrs.value |= winnt::FILE_ATTRIBUTE_ARCHIVE;
+									stat.update_mtime(SystemTime::now());
+									stream.write().unwrap().data.clear();
+								}
+								FILE_CREATE => return Err(STATUS_OBJECT_NAME_COLLISION),
+								_ => (),
+							}
+							Some((stream, false))
+						} else {
+							if create_disposition == FILE_OPEN
+								|| create_disposition == FILE_OVERWRITE
+							{
+								return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+							}
+							if is_readonly {
+								return Err(STATUS_ACCESS_DENIED);
+							}
+							let stream = Arc::new(RwLock::new(AltStream::new()));
+							stat.update_atime(SystemTime::now());
+							assert!(stat
+								.alt_streams
+								.insert(EntryName(stream_info.name.to_owned()), Arc::clone(&stream))
+								.is_none());
+							Some((stream, true))
+						}
+					}
+				} else {
+					None
+				};
+				if let Some((stream, new_file_created)) = ret {
+					return Ok(CreateFileInfo {
+						context: EntryHandle::new(entry.clone(), Some(stream), delete_on_close),
+						is_dir: false,
+						new_file_created,
+					});
+				}
+				match entry {
+					Entry::File(file) => {
+						if create_options & FILE_DIRECTORY_FILE > 0 {
+							return Err(STATUS_NOT_A_DIRECTORY);
+						}
+						match create_disposition {
+							FILE_SUPERSEDE | FILE_OVERWRITE | FILE_OVERWRITE_IF => {
+								if create_disposition != FILE_SUPERSEDE && is_readonly
+									|| is_hidden_system
+								{
+									return Err(STATUS_ACCESS_DENIED);
+								}
+								file.data.write().unwrap().clear();
+								let mut stat = file.stat.write().unwrap();
+								stat.attrs = Attributes::new(
+									file_attributes | winnt::FILE_ATTRIBUTE_ARCHIVE,
+								);
+								stat.update_mtime(SystemTime::now());
+							}
+							FILE_CREATE => return Err(STATUS_OBJECT_NAME_COLLISION),
+							_ => (),
+						}
+						Ok(CreateFileInfo {
+							context: EntryHandle::new(
+								Entry::File(Arc::clone(&file)),
+								None,
+								delete_on_close,
+							),
+							is_dir: false,
+							new_file_created: false,
+						})
+					}
+					Entry::Directory(dir) => {
+						if create_options & FILE_NON_DIRECTORY_FILE > 0 {
+							return Err(STATUS_FILE_IS_A_DIRECTORY);
+						}
+						match create_disposition {
+							FILE_OPEN | FILE_OPEN_IF => Ok(CreateFileInfo {
+								context: EntryHandle::new(
+									Entry::Directory(Arc::clone(&dir)),
+									None,
+									delete_on_close,
+								),
+								is_dir: true,
+								new_file_created: false,
+							}),
+							FILE_CREATE => Err(STATUS_OBJECT_NAME_COLLISION),
+							_ => Err(STATUS_INVALID_PARAMETER),
+						}
+					}
+				}
+			} else {
+				if parent.stat.read().unwrap().delete_pending {
+					return Err(STATUS_DELETE_PENDING);
+				}
+				let token = info.requester_token().unwrap();
+				if create_options & FILE_DIRECTORY_FILE > 0 {
+					match create_disposition {
+						FILE_CREATE | FILE_OPEN_IF => self.create_new(
+							&name,
+							file_attributes,
+							delete_on_close,
+							security_context.AccessState.SecurityDescriptor,
+							token.as_raw_handle(),
+							&parent,
+							&mut children,
+							true,
+						),
+						FILE_OPEN => Err(STATUS_OBJECT_NAME_NOT_FOUND),
+						_ => Err(STATUS_INVALID_PARAMETER),
+					}
+				} else {
+					if create_disposition == FILE_OPEN || create_disposition == FILE_OVERWRITE {
+						Err(STATUS_OBJECT_NAME_NOT_FOUND)
+					} else {
+						self.create_new(
+							&name,
+							file_attributes | winnt::FILE_ATTRIBUTE_ARCHIVE,
+							delete_on_close,
+							security_context.AccessState.SecurityDescriptor,
+							token.as_raw_handle(),
+							&parent,
+							&mut children,
+							false,
+						)
+					}
+				}
+			}
 		} else {
 			if create_disposition == FILE_OPEN || create_disposition == FILE_OPEN_IF {
 				if create_options & FILE_NON_DIRECTORY_FILE > 0 {
@@ -571,8 +747,38 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<u32> {
-		return Err(STATUS_ACCESS_DENIED);
-		// not allowed by subsonic api
+		let do_write = |data: &mut Vec<_>| {
+			let offset = if info.write_to_eof() {
+				data.len()
+			} else {
+				offset as usize
+			};
+			let len = buffer.len();
+			if offset + len > data.len() {
+				data.resize(offset + len, 0);
+			}
+			data[offset..offset + len].copy_from_slice(buffer);
+			len as u32
+		};
+		let alt_stream = context.alt_stream.read().unwrap();
+		let ret = if let Some(stream) = alt_stream.as_ref() {
+			Ok(do_write(&mut stream.write().unwrap().data))
+		} else if let Entry::File(file) = &context.entry {
+			Ok(do_write(&mut file.data.write().unwrap()))
+		} else {
+			Err(STATUS_ACCESS_DENIED)
+		};
+		if ret.is_ok() {
+			context.entry.stat().write().unwrap().attrs.value |= winnt::FILE_ATTRIBUTE_ARCHIVE;
+			let now = SystemTime::now();
+			if context.mtime_enabled.load(Ordering::Relaxed) {
+				*context.mtime_delayed.lock().unwrap() = Some(now);
+			}
+			if context.atime_enabled.load(Ordering::Relaxed) {
+				*context.atime_delayed.lock().unwrap() = Some(now);
+			}
+		}
+		ret
 	}
 
 	fn flush_file_buffers(
@@ -620,16 +826,17 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		if context.alt_stream.read().unwrap().is_some() {
 			return Err(STATUS_INVALID_DEVICE_REQUEST);
 		}
+		
 		if let Entry::Directory(dir) = &context.entry {
 			let children = dir.children.read().unwrap();
 			let our_entry_name: EntryName = EntryName {
-				0: "test".into()
+				0: "test.mp3".into()
 			};
-			let our_file_entry: FileEntry = FileEntry { stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into(), data: Vec::new().into() };
+			let our_file_entry: FileEntry = FileEntry { stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into(), data: include_bytes!("test.mp3").to_vec().into() };
 			let our_gen_entry: Entry = Entry::File(our_file_entry.into());
 			let mut children: HashMap<EntryName, Entry> = children.clone();
 			children.insert(our_entry_name, our_gen_entry);
-			
+
 			for (k, v) in children.iter() {
 				let stat = v.stat().read().unwrap();
 				fill_find_data(&FindData {
@@ -658,6 +865,9 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
+		let mut stat = context.entry.stat().write().unwrap();
+		stat.attrs = Attributes::new(file_attributes);
+		context.update_atime(&mut stat, SystemTime::now());
 		Ok(())
 	}
 
@@ -670,6 +880,22 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
+		let mut stat = context.entry.stat().write().unwrap();
+		let process_time_info = |time_info: &FileTimeOperation,
+		                         time: &mut SystemTime,
+		                         flag: &AtomicBool| match time_info {
+			FileTimeOperation::SetTime(new_time) => {
+				if flag.load(Ordering::Relaxed) {
+					*time = *new_time
+				}
+			}
+			FileTimeOperation::DisableUpdate => flag.store(false, Ordering::Relaxed),
+			FileTimeOperation::ResumeUpdate => flag.store(true, Ordering::Relaxed),
+			FileTimeOperation::DontChange => (),
+		};
+		process_time_info(&creation_time, &mut stat.ctime, &context.ctime_enabled);
+		process_time_info(&last_write_time, &mut stat.mtime, &context.mtime_enabled);
+		process_time_info(&last_access_time, &mut stat.atime, &context.atime_enabled);
 		Ok(())
 	}
 
@@ -679,7 +905,16 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
-		Err(STATUS_ACCESS_DENIED)
+		if context.entry.stat().read().unwrap().attrs.value & winnt::FILE_ATTRIBUTE_READONLY > 0 {
+			return Err(STATUS_CANNOT_DELETE);
+		}
+		let alt_stream = context.alt_stream.read().unwrap();
+		if let Some(stream) = alt_stream.as_ref() {
+			stream.write().unwrap().delete_pending = info.delete_on_close();
+		} else {
+			context.entry.stat().write().unwrap().delete_pending = info.delete_on_close();
+		}
+		Ok(())
 	}
 
 	fn delete_directory(
@@ -702,7 +937,8 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 			if info.delete_on_close() && !children.is_empty() {
 				Err(STATUS_DIRECTORY_NOT_EMPTY)
 			} else {
-				Err(STATUS_ACCESS_DENIED)
+				stat.delete_pending = info.delete_on_close();
+				Ok(())
 			}
 		} else {
 			Err(STATUS_INVALID_DEVICE_REQUEST)
@@ -717,7 +953,182 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
-		Err(STATUS_ACCESS_DENIED)
+		let src_path = file_name.as_slice();
+		let offset = src_path
+			.iter()
+			.rposition(|x| *x == '\\' as u16)
+			.ok_or(STATUS_INVALID_PARAMETER)?;
+		let src_name = U16Str::from_slice(&src_path[offset + 1..]);
+		let src_parent = context
+			.entry
+			.stat()
+			.read()
+			.unwrap()
+			.parent
+			.upgrade()
+			.ok_or(STATUS_INVALID_DEVICE_REQUEST)?;
+		if new_file_name.as_slice().first() == Some(&(':' as u16)) {
+			let src_stream_info = FullName::new(src_name)?.stream_info;
+			let dst_stream_info =
+				FullName::new(U16Str::from_slice(new_file_name.as_slice()))?.stream_info;
+			let src_is_default = context.alt_stream.read().unwrap().is_none();
+			let dst_is_default = if let Some(stream_info) = &dst_stream_info {
+				stream_info.check_default(context.entry.is_dir())?
+			} else {
+				true
+			};
+			let check_can_move = |streams: &mut HashMap<EntryName, Arc<RwLock<AltStream>>>,
+			                      name: &U16Str| {
+				let name_ref = EntryNameRef::new(name);
+				if let Some(stream) = streams.get(name_ref) {
+					if context
+						.alt_stream
+						.read()
+						.unwrap()
+						.as_ref()
+						.map(|s| Arc::ptr_eq(s, stream))
+						.unwrap_or(false)
+					{
+						Ok(())
+					} else if !replace_if_existing {
+						Err(STATUS_OBJECT_NAME_COLLISION)
+					} else if stream.read().unwrap().handle_count > 0 {
+						Err(STATUS_ACCESS_DENIED)
+					} else {
+						streams.remove(name_ref).unwrap();
+						Ok(())
+					}
+				} else {
+					Ok(())
+				}
+			};
+			let mut stat = context.entry.stat().write().unwrap();
+			match (src_is_default, dst_is_default) {
+				(true, true) => {
+					if context.entry.is_dir() {
+						return Err(STATUS_OBJECT_NAME_INVALID);
+					}
+				}
+				(true, false) => {
+					if let Entry::File(file) = &context.entry {
+						let dst_name = dst_stream_info.unwrap().name;
+						check_can_move(&mut stat.alt_streams, dst_name)?;
+						let mut stream = AltStream::new();
+						let mut data = file.data.write().unwrap();
+						stream.handle_count = 1;
+						stream.delete_pending = stat.delete_pending;
+						stat.delete_pending = false;
+						stream.data = data.clone();
+						data.clear();
+						let stream = Arc::new(RwLock::new(stream));
+						assert!(stat
+							.alt_streams
+							.insert(EntryName(dst_name.to_owned()), Arc::clone(&stream))
+							.is_none());
+						*context.alt_stream.write().unwrap() = Some(stream);
+					} else {
+						return Err(STATUS_OBJECT_NAME_INVALID);
+					}
+				}
+				(false, true) => {
+					if let Entry::File(file) = &context.entry {
+						let mut context_stream = context.alt_stream.write().unwrap();
+						let src_stream = context_stream.as_ref().unwrap();
+						let mut src_stream_locked = src_stream.write().unwrap();
+						if src_stream_locked.handle_count > 1 {
+							return Err(STATUS_SHARING_VIOLATION);
+						}
+						if !replace_if_existing {
+							return Err(STATUS_OBJECT_NAME_COLLISION);
+						}
+						src_stream_locked.handle_count -= 1;
+						stat.delete_pending = src_stream_locked.delete_pending;
+						src_stream_locked.delete_pending = false;
+						*file.data.write().unwrap() = src_stream_locked.data.clone();
+						stat.alt_streams
+							.remove(EntryNameRef::new(src_stream_info.unwrap().name))
+							.unwrap();
+						std::mem::drop(src_stream_locked);
+						*context_stream = None;
+					} else {
+						return Err(STATUS_OBJECT_NAME_INVALID);
+					}
+				}
+				(false, false) => {
+					let dst_name = dst_stream_info.unwrap().name;
+					check_can_move(&mut stat.alt_streams, dst_name)?;
+					let stream = stat
+						.alt_streams
+						.remove(EntryNameRef::new(src_stream_info.unwrap().name))
+						.unwrap();
+					stat.alt_streams
+						.insert(EntryName(dst_name.to_owned()), Arc::clone(&stream));
+					*context.alt_stream.write().unwrap() = Some(stream);
+				}
+			}
+			stat.update_atime(SystemTime::now());
+		} else {
+			if context.alt_stream.read().unwrap().is_some() {
+				return Err(STATUS_OBJECT_NAME_INVALID);
+			}
+			let (dst_name, dst_parent) =
+				path::split_path(&self.root, new_file_name)?.ok_or(STATUS_OBJECT_NAME_INVALID)?;
+			if dst_name.stream_info.is_some() {
+				return Err(STATUS_OBJECT_NAME_INVALID);
+			}
+			let now = SystemTime::now();
+			let src_name_ref = EntryNameRef::new(src_name);
+			let dst_name_ref = EntryNameRef::new(dst_name.file_name);
+			let check_can_move = |children: &mut HashMap<EntryName, Entry>| {
+				if let Some(entry) = children.get(dst_name_ref) {
+					if &context.entry == entry {
+						Ok(())
+					} else if !replace_if_existing {
+						Err(STATUS_OBJECT_NAME_COLLISION)
+					} else if context.entry.is_dir() || entry.is_dir() {
+						Err(STATUS_ACCESS_DENIED)
+					} else {
+						let stat = entry.stat().read().unwrap();
+						let can_replace = stat.handle_count > 0
+							|| stat.attrs.value & winnt::FILE_ATTRIBUTE_READONLY > 0;
+						std::mem::drop(stat);
+						if can_replace {
+							Err(STATUS_ACCESS_DENIED)
+						} else {
+							children.remove(dst_name_ref).unwrap();
+							Ok(())
+						}
+					}
+				} else {
+					Ok(())
+				}
+			};
+			if Arc::ptr_eq(&src_parent, &dst_parent) {
+				let mut children = src_parent.children.write().unwrap();
+				check_can_move(&mut children)?;
+				// Remove first in case moving to the same name.
+				let entry = children.remove(src_name_ref).unwrap();
+				assert!(children
+					.insert(EntryName(dst_name.file_name.to_owned()), entry)
+					.is_none());
+				src_parent.stat.write().unwrap().update_mtime(now);
+				context.update_atime(&mut context.entry.stat().write().unwrap(), now);
+			} else {
+				let mut src_children = src_parent.children.write().unwrap();
+				let mut dst_children = dst_parent.children.write().unwrap();
+				check_can_move(&mut dst_children)?;
+				let entry = src_children.remove(src_name_ref).unwrap();
+				assert!(dst_children
+					.insert(EntryName(dst_name.file_name.to_owned()), entry)
+					.is_none());
+				src_parent.stat.write().unwrap().update_mtime(now);
+				dst_parent.stat.write().unwrap().update_mtime(now);
+				let mut stat = context.entry.stat().write().unwrap();
+				stat.parent = Arc::downgrade(&dst_parent);
+				context.update_atime(&mut stat, now);
+			}
+		}
+		Ok(())
 	}
 
 	fn set_end_of_file(
@@ -727,7 +1138,23 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for MemFsHandler {
 		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
-		Err(STATUS_ACCESS_DENIED)
+		let alt_stream = context.alt_stream.read().unwrap();
+		let ret = if let Some(stream) = alt_stream.as_ref() {
+			stream.write().unwrap().data.resize(offset as usize, 0);
+			Ok(())
+		} else if let Entry::File(file) = &context.entry {
+			file.data.write().unwrap().resize(offset as usize, 0);
+			Ok(())
+		} else {
+			Err(STATUS_INVALID_DEVICE_REQUEST)
+		};
+		if ret.is_ok() {
+			context.update_mtime(
+				&mut context.entry.stat().write().unwrap(),
+				SystemTime::now(),
+			);
+		}
+		ret
 	}
 
 	fn set_allocation_size(
@@ -924,9 +1351,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	};
 
 	let handler = MemFsHandler::new();
-	
-	let mut empty: HashMap<EntryName, Entry> = HashMap::new();
-	use widestring::u16str;
 
 	init();
 
@@ -935,6 +1359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("File system will mount...");
 
 	let file_system = mounter.mount()?;
+	
 	
 
 	// Another thread can unmount the file system.
