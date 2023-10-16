@@ -7,6 +7,18 @@ pub fn client(site: &str, username: &str, password: &str) -> Client {
 }
 
 #[derive(Clone, Debug)]
+pub struct IdentifiedSong {
+    pub song: String,
+    pub song_id: String,
+}
+
+impl PartialEq for IdentifiedSong {
+    fn eq(&self, rhs: &IdentifiedSong) -> bool { 
+        return self.song_id == rhs.song_id;
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct IdentifiedArtist {
     pub artist: String,
     pub artist_id: String,
@@ -22,6 +34,7 @@ impl PartialEq for IdentifiedArtist {
 pub struct IdentifiedAlbum {
     pub album: String,
     pub album_id: String,
+    pub songs: Vec<IdentifiedSong>,
 }
 
 impl PartialEq for IdentifiedAlbum {
@@ -30,14 +43,22 @@ impl PartialEq for IdentifiedAlbum {
     }
 }
 
-fn get_albums(client: Client) -> Result<Vec<Album>, sunk::Error> {
+fn get_albums(client: &Client) -> Result<Vec<Album>, sunk::Error> {
     let list = ListType::default();
     let all_results = Album::list(&client, list, ALL, 0);
     all_results
 }
 
+fn songvec_to_identifiedsongvec(songvec: Vec<Song>) -> Vec<IdentifiedSong> {
+    let mut ret: Vec<IdentifiedSong> = Vec::new();
+    for song in songvec {
+        ret.push(IdentifiedSong { song: song.title.clone(), song_id: song.id.to_string() });
+    }
+    ret
+}
+
 fn artist_albums(client: Client) -> Vec<(IdentifiedArtist, IdentifiedAlbum)> { //Vec<(String, Vec<String>)> {
-    let albums = get_albums(client).unwrap();
+    let albums = get_albums(&client).unwrap();
     let mut pairs: Vec<(IdentifiedArtist, IdentifiedAlbum)> = Vec::new();
     for album in albums {
         let pair = (IdentifiedArtist {
@@ -46,6 +67,7 @@ fn artist_albums(client: Client) -> Vec<(IdentifiedArtist, IdentifiedAlbum)> { /
         }, IdentifiedAlbum {
             album: album.clone().name.clone(),
             album_id: album.clone().id.clone(),
+            songs: songvec_to_identifiedsongvec(album.songs(&client).unwrap()),
         });
         pairs.push(pair);
     }
