@@ -836,14 +836,20 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 		}
 		
 		if let Entry::Directory(dir) = &context.entry {
-			let children = dir.children.read().unwrap();
-			let our_entry_name: EntryName = EntryName {
-				0: "test.mp3".into()
-			};
-			let our_file_entry: FileEntry = FileEntry { stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into(), data: include_bytes!("test.mp3").to_vec().into() };
-			let our_gen_entry: Entry = Entry::File(our_file_entry.into());
-			let mut children: HashMap<EntryName, Entry> = children.clone();
-			children.insert(our_entry_name, our_gen_entry);
+			
+			let mut children: HashMap<EntryName, Entry> = HashMap::new();
+
+			for (artist, _albums) in &self.info.desired_folders {
+				let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
+				let artist_children: HashMap<EntryName, Entry> = HashMap::new();
+				let dir_entry: DirEntry = DirEntry {
+					stat,
+					children: artist_children.into(),
+				};
+				let gen_entry: Entry = Entry::Directory(dir_entry.into());
+				let entry_name: EntryName = EntryName(artist.clone().artist.into());
+				children.insert(entry_name, gen_entry);
+			}
 
 			for (k, v) in children.iter() {
 				let stat = v.stat().read().unwrap();
