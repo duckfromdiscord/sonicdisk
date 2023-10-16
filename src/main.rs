@@ -501,19 +501,59 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 		create_options: u32,
 		info: &mut OperationInfo<'c, 'h, Self>,
 	) -> OperationResult<CreateFileInfo<Self::Context>> {
-		if (file_name.to_string().unwrap() == "\\test.mp3") {
-			let our_file_entry: FileEntry = FileEntry { stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), data: include_bytes!("test.mp3").to_vec().into() };
 
-			return Ok(CreateFileInfo {
-				context: EntryHandle::new(
-					Entry::File(our_file_entry.into()),
-					None,
-					false,
-				),
-				is_dir: false,
-				new_file_created: false,
-			});
+		for (artist, albums) in &self.info.desired_folders {
+			if file_name.to_string().unwrap().starts_with(&format!("\\{}", artist.artist).to_string()) {
+				if file_name.to_string().unwrap() == format!("\\{}", artist.artist).to_string() {
+					let mut artist_children: HashMap<EntryName, Entry> = HashMap::new();
+					for album in albums {
+						let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into();
+						let tracks: HashMap<EntryName, Entry> = HashMap::new();
+						let album_dir_entry: DirEntry = DirEntry {
+							stat,
+							children: tracks.into(),
+						};
+						let gen_entry: Entry = Entry::Directory(album_dir_entry.into());
+						let entry_name: EntryName = EntryName(album.clone().album.into());
+						artist_children.insert(entry_name, gen_entry);
+					}
+
+					let artist_dir_entry: DirEntry = DirEntry {
+						stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), 
+						children: artist_children.into(),
+					};
+
+					return Ok(CreateFileInfo {
+						context: EntryHandle::new(
+							Entry::Directory(artist_dir_entry.into()),
+							None,
+							false,
+						),
+						is_dir: true,
+						new_file_created: false,
+					});
+				} else {
+					for album in albums {
+						if file_name.to_string().unwrap() == format!("\\{}\\{}", artist.artist, album.album).to_string() {
+							let album_dir_entry: DirEntry = DirEntry {
+								stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), 
+								children: HashMap::new().into(),
+							};
+							return Ok(CreateFileInfo {
+								context: EntryHandle::new(
+									Entry::Directory(album_dir_entry.into()),
+									None,
+									false,
+								),
+								is_dir: true,
+								new_file_created: false,
+							});
+						}
+					}
+				}
+			}
 		}
+
 
 		if create_disposition > FILE_MAXIMUM_DISPOSITION {
 			return Err(STATUS_INVALID_PARAMETER);
@@ -826,7 +866,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 
 	fn find_files(
 		&'h self,
-		_file_name: &U16CStr,
+		file_name: &U16CStr,
 		mut fill_find_data: impl FnMut(&FindData) -> FillDataResult,
 		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
@@ -836,20 +876,67 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 		}
 		
 		if let Entry::Directory(dir) = &context.entry {
-			
 			let mut children: HashMap<EntryName, Entry> = HashMap::new();
 
-			for (artist, _albums) in &self.info.desired_folders {
-				let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
-				let artist_children: HashMap<EntryName, Entry> = HashMap::new();
-				let dir_entry: DirEntry = DirEntry {
-					stat,
-					children: artist_children.into(),
-				};
-				let gen_entry: Entry = Entry::Directory(dir_entry.into());
-				let entry_name: EntryName = EntryName(artist.clone().artist.into());
-				children.insert(entry_name, gen_entry);
+
+			// root directory should only display artists
+			if file_name.to_string().unwrap() == "\\" {
+				for (artist, albums) in &self.info.desired_folders {
+					let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
+					let artist_children: HashMap<EntryName, Entry> = HashMap::new();
+					let artist_dir_entry: DirEntry = DirEntry {
+						stat,
+						children: artist_children.into(),
+					};
+					let gen_entry: Entry = Entry::Directory(artist_dir_entry.into());
+					let entry_name: EntryName = EntryName(artist.clone().artist.into());
+					children.insert(entry_name, gen_entry);
+				}
+			} else {
+
+				
+				// inside an artist folder, show only this artist's albums
+				for (artist, albums) in &self.info.desired_folders {
+					if file_name.to_string().unwrap().starts_with(&format!("\\{}", artist.artist).to_string()) {
+						if file_name.to_string().unwrap() == format!("\\{}", artist.artist).to_string() {
+							// we're looking at the artist folder itself
+							for album in albums {
+								let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
+								let tracks: HashMap<EntryName, Entry> = HashMap::new();
+								let album_dir_entry: DirEntry = DirEntry {
+									stat,
+									children: tracks.into(),
+								};
+								let gen_entry: Entry = Entry::Directory(album_dir_entry.into());
+								let entry_name: EntryName = EntryName(album.clone().album.into());
+								children.insert(entry_name, gen_entry);
+							}
+						} else {
+							// we're looking at an album inside the artist's folder
+							for album in albums {
+								if file_name.to_string().unwrap() == format!("\\{}\\{}", artist.artist, album.album).to_string() {
+									for song in &album.songs {
+										let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
+										let song_file_entry: FileEntry = FileEntry {
+											stat,
+											data: vec![].into(),
+										};
+										let gen_entry: Entry = Entry::File(song_file_entry.into());
+										let entry_name: EntryName = EntryName(song.clone().song.into());
+										children.insert(entry_name, gen_entry);
+									}
+								}
+							}
+
+						}
+
+
+					}
+				}
 			}
+			
+
+
 
 			for (k, v) in children.iter() {
 				let stat = v.stat().read().unwrap();
@@ -1365,8 +1452,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let mount_point = U16CString::from_str(matches.value_of("mount_point").unwrap())?;
 	
 	let client: sunk::Client = subsonic::client(matches.value_of("url").unwrap(), matches.value_of("username").unwrap(), matches.value_of("password").unwrap());
-
-	dbg!(client.music_folders().unwrap());
 
 	let mut flags = MountFlags::ALT_STREAM;
 	if matches.is_present("dokan_debug") {
