@@ -38,10 +38,9 @@ impl IdentifiedSong {
     pub fn get_size(&self) -> Option<u64> {
         match &self.url {
             Some(url) => {
-                dbg!(url.clone());
                 let httpclient = reqwest::blocking::Client::new();
                 let data = httpclient.head(url.clone()).send().unwrap();
-                let len = dbg!(data).headers().get("content-length").unwrap().to_str().unwrap().parse().unwrap();
+                let len = data.headers().get("content-length").unwrap().to_str().unwrap().parse().unwrap();
                 Some(len)
             },
             None => {
