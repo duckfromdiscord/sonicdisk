@@ -18,3 +18,4 @@ regex = "1.4.3"
 windows-permissions = "0.2.4"
 widestring = { version = "1.0.2", features = ["std"] }
 sunk = { path = "../sunk" }
+reqwest = { version = "0.11.22", features = ["blocking"] }

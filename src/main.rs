@@ -192,14 +192,16 @@ impl Eq for EntryName {}
 #[derive(Debug)]
 struct FileEntry {
 	stat: RwLock<Stat>,
-	data: RwLock<Vec<u8>>,
+	//data: RwLock<Vec<u8>>,
+	len: u64,
 }
 
 impl FileEntry {
 	fn new(stat: Stat) -> Self {
 		Self {
 			stat: RwLock::new(stat),
-			data: RwLock::new(Vec::new()),
+			//data: RwLock::new(Vec::new()),
+			len: 0,
 		}
 	}
 }
@@ -557,7 +559,8 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 									if file_name.to_string().unwrap() == format!("\\{}\\{}\\{}", artist.artist, album.album, song.get_filename()).to_string() {
 										let song_file_entry: FileEntry = FileEntry {
 											stat: Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&self.root)).into(), 
-											data: vec![].into(),
+											//data: vec![].into(),
+											len: song.get_size().unwrap(),
 										};
 										return Ok(CreateFileInfo {
 											context: EntryHandle::new(
@@ -671,7 +674,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 								{
 									return Err(STATUS_ACCESS_DENIED);
 								}
-								file.data.write().unwrap().clear();
+								//file.data.write().unwrap().clear();
 								let mut stat = file.stat.write().unwrap();
 								stat.attrs = Attributes::new(
 									file_attributes | winnt::FILE_ATTRIBUTE_ARCHIVE,
@@ -789,12 +792,50 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 
 	fn read_file(
 		&'h self,
-		_file_name: &U16CStr,
+		file_name: &U16CStr,
 		offset: i64,
 		buffer: &mut [u8],
 		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<u32> {
+		
+		let mut url: Option<String> = None;
+
+		for (artist, albums) in &self.info.desired_folders {
+			if file_name.to_string().unwrap().starts_with(&format!("\\{}", artist.artist).to_string()) && !(file_name.to_string().unwrap() == format!("\\{}", artist.artist).to_string()) {
+					for album in albums {
+						if file_name.to_string().unwrap().starts_with(&format!("\\{}\\{}", artist.artist, album.album).to_string()) {
+							let songs: Vec<IdentifiedSong> = album.songs.clone();
+								// getting song
+								for song in songs {
+									if file_name.to_string().unwrap() == format!("\\{}\\{}\\{}", artist.artist, album.album, song.get_filename()).to_string() {
+										url = Some(song.url.unwrap());
+									}
+								}
+						}
+					}
+			}
+		}
+
+		match url {
+			Some(url) => {
+				let client = reqwest::blocking::Client::new();
+				let data = client.get(url)
+				.header(reqwest::header::RANGE, format!("bytes={offset}-{}", offset as usize + buffer.len()-1) )
+				.send()
+				.unwrap()
+				.bytes()
+				.unwrap();
+				let len = data.len();
+				buffer[0..len].copy_from_slice(&data);
+				Ok(len.try_into().unwrap())
+			},
+			None => {
+				return Err(STATUS_INVALID_DEVICE_REQUEST);
+			}
+		}
+
+		/*
 		let mut do_read = |data: &Vec<_>| {
 			let offset = offset as usize;
 			let len = std::cmp::min(buffer.len(), data.len() - offset);
@@ -809,6 +850,9 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 		} else {
 			Err(STATUS_INVALID_DEVICE_REQUEST)
 		}
+		 */
+
+
 	}
 
 	fn write_file(
@@ -836,7 +880,8 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 		let ret = if let Some(stream) = alt_stream.as_ref() {
 			Ok(do_write(&mut stream.write().unwrap().data))
 		} else if let Entry::File(file) = &context.entry {
-			Ok(do_write(&mut file.data.write().unwrap()))
+			//Ok(do_write(&mut file.data.write().unwrap()))
+			Err(STATUS_ACCESS_DENIED)
 		} else {
 			Err(STATUS_ACCESS_DENIED)
 		};
@@ -879,7 +924,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 				stream.read().unwrap().data.len() as u64
 			} else {
 				match &context.entry {
-					Entry::File(file) => file.data.read().unwrap().len() as u64,
+					Entry::File(file) => file.len as u64,
 					Entry::Directory(_) => 0,
 				}
 			},
@@ -943,7 +988,8 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 										let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
 										let song_file_entry: FileEntry = FileEntry {
 											stat,
-											data: vec![].into(),
+											//data: vec![].into(),
+											len: song.get_size().unwrap(),
 										};
 										let gen_entry: Entry = Entry::File(song_file_entry.into());
 										let entry_name: EntryName = EntryName(song.get_filename().into());
@@ -970,7 +1016,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 					last_access_time: stat.atime,
 					last_write_time: stat.mtime,
 					file_size: match v {
-						Entry::File(file) => file.data.read().unwrap().len() as u64,
+						Entry::File(file) => file.len as u64,
 						Entry::Directory(_) => 0,
 					},
 					file_name: U16CString::from_ustr(&k.0).unwrap(),
@@ -1139,12 +1185,12 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 						let dst_name = dst_stream_info.unwrap().name;
 						check_can_move(&mut stat.alt_streams, dst_name)?;
 						let mut stream = AltStream::new();
-						let mut data = file.data.write().unwrap();
+						//let mut data = file.data.write().unwrap();
 						stream.handle_count = 1;
 						stream.delete_pending = stat.delete_pending;
 						stat.delete_pending = false;
-						stream.data = data.clone();
-						data.clear();
+						//stream.data = data.clone();
+						//data.clear();
 						let stream = Arc::new(RwLock::new(stream));
 						assert!(stat
 							.alt_streams
@@ -1169,7 +1215,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 						src_stream_locked.handle_count -= 1;
 						stat.delete_pending = src_stream_locked.delete_pending;
 						src_stream_locked.delete_pending = false;
-						*file.data.write().unwrap() = src_stream_locked.data.clone();
+						//*file.data.write().unwrap() = src_stream_locked.data.clone();
 						stat.alt_streams
 							.remove(EntryNameRef::new(src_stream_info.unwrap().name))
 							.unwrap();
@@ -1268,7 +1314,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 			stream.write().unwrap().data.resize(offset as usize, 0);
 			Ok(())
 		} else if let Entry::File(file) = &context.entry {
-			file.data.write().unwrap().resize(offset as usize, 0);
+			//file.data.write().unwrap().resize(offset as usize, 0);
 			Ok(())
 		} else {
 			Err(STATUS_INVALID_DEVICE_REQUEST)
@@ -1307,7 +1353,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 			set_alloc(&mut stream.write().unwrap().data);
 			Ok(())
 		} else if let Entry::File(file) = &context.entry {
-			set_alloc(&mut file.data.write().unwrap());
+			//set_alloc(&mut file.data.write().unwrap());
 			Ok(())
 		} else {
 			Err(STATUS_INVALID_DEVICE_REQUEST)
@@ -1408,7 +1454,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	) -> OperationResult<()> {
 		if let Entry::File(file) = &context.entry {
 			fill_find_stream_data(&FindStreamData {
-				size: file.data.read().unwrap().len() as i64,
+				size: file.len as i64,
 				name: U16CString::from_str("::$DATA").unwrap(),
 			})
 			.or_else(ignore_name_too_long)?;

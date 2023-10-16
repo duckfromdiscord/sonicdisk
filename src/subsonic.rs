@@ -10,7 +10,8 @@ pub fn client(site: &str, username: &str, password: &str) -> Client {
 pub struct IdentifiedSong {
     pub song: String,
     pub song_id: String,
-    pub format: String,
+    pub streamable: Song,
+    pub url: Option<String>,
 }
 
 impl PartialEq for IdentifiedSong {
@@ -21,7 +22,7 @@ impl PartialEq for IdentifiedSong {
 
 impl IdentifiedSong {
     pub fn get_filename(&self) -> String {
-        let extension = match self.format.as_str() {
+        let extension = match self.streamable.content_type.clone().as_str() {
             "audio/x-flac" => {
                 ".flac"
             },
@@ -33,6 +34,20 @@ impl IdentifiedSong {
             }
         };
         return self.song.clone() + extension;
+    }
+    pub fn get_size(&self) -> Option<u64> {
+        match &self.url {
+            Some(url) => {
+                dbg!(url.clone());
+                let httpclient = reqwest::blocking::Client::new();
+                let data = httpclient.head(url.clone()).send().unwrap();
+                let len = dbg!(data).headers().get("content-length").unwrap().to_str().unwrap().parse().unwrap();
+                Some(len)
+            },
+            None => {
+                None
+            },
+        }
     }
 }
 
@@ -67,10 +82,19 @@ fn get_albums(client: &Client) -> Result<Vec<Album>, sunk::Error> {
     all_results
 }
 
-fn songvec_to_identifiedsongvec(songvec: Vec<Song>) -> Vec<IdentifiedSong> {
+fn songvec_to_identifiedsongvec(songvec: Vec<Song>, client: Option<&Client>) -> Vec<IdentifiedSong> {
     let mut ret: Vec<IdentifiedSong> = Vec::new();
     for song in songvec {
-        ret.push(IdentifiedSong { song: song.title.clone(), song_id: song.id.to_string(), format: song.content_type.clone() });
+        let url: Option<String> = match client {
+            Some(client) => {
+                Some(song.download_url(&client).unwrap())
+            },
+            None => {
+                None
+            },
+        };
+        
+        ret.push(IdentifiedSong { song: song.title.clone(), song_id: song.id.to_string(), streamable: song, url, });
     }
     ret
 }
@@ -85,7 +109,7 @@ fn artist_albums(client: Client) -> Vec<(IdentifiedArtist, IdentifiedAlbum)> { /
         }, IdentifiedAlbum {
             album: album.clone().name.clone(),
             album_id: album.clone().id.clone(),
-            songs: songvec_to_identifiedsongvec(album.songs(&client).unwrap()),
+            songs: songvec_to_identifiedsongvec(album.songs(&client).unwrap(), Some(&client)),
         });
         pairs.push(pair);
     }
