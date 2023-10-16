@@ -10,7 +10,7 @@ use std::{
 	hash::{Hash, Hasher},
 	os::windows::io::AsRawHandle,
 	sync::{
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicBool, Ordering},
 		Arc, Mutex, RwLock, Weak,
 	},
 	time::SystemTime,
@@ -176,16 +176,6 @@ struct FileEntry {
 	len: u64,
 }
 
-impl FileEntry {
-	fn new(stat: Stat) -> Self {
-		Self {
-			stat: RwLock::new(stat),
-			//data: RwLock::new(Vec::new()),
-			len: 0,
-		}
-	}
-}
-
 // The compiler incorrectly believes that its usage in a public function of the private path module is public.
 #[derive(Debug)]
 pub struct DirEntry {
@@ -293,13 +283,6 @@ impl EntryHandle {
 			stat.atime = atime;
 		}
 	}
-
-	fn update_mtime(&self, stat: &mut Stat, mtime: SystemTime) {
-		self.update_atime(stat, mtime);
-		if self.mtime_enabled.load(Ordering::Relaxed) {
-			stat.mtime = mtime;
-		}
-	}
 }
 
 impl Drop for EntryHandle {
@@ -342,7 +325,6 @@ impl Drop for EntryHandle {
 
 #[derive(Debug)]
 struct SubFSHandler {
-	id_counter: AtomicU64,
 	root: Arc<DirEntry>,
 	info: SubsonicInfo,
 }
@@ -350,7 +332,6 @@ struct SubFSHandler {
 impl SubFSHandler {
 	fn new(info: SubsonicInfo) -> Self {
 		Self {
-			id_counter: AtomicU64::new(1),
 			root: Arc::new(DirEntry::new(Stat::new(
 				0,
 				0,
@@ -361,60 +342,17 @@ impl SubFSHandler {
 		}
 	}
 
-	fn next_id(&self) -> u64 {
-		self.id_counter.fetch_add(1, Ordering::Relaxed)
-	}
-
 	fn create_new(
 		&self,
-		name: &FullName,
-		attrs: u32,
-		delete_on_close: bool,
-		creator_desc: winnt::PSECURITY_DESCRIPTOR,
-		token: ntdef::HANDLE,
-		parent: &Arc<DirEntry>,
-		children: &mut HashMap<EntryName, Entry>,
-		is_dir: bool,
+		_name: &FullName,
+		_attrs: u32,
+		_delete_on_close: bool,
+		_creator_desc: winnt::PSECURITY_DESCRIPTOR,
+		_token: ntdef::HANDLE,
+		_parent: &Arc<DirEntry>,
+		_children: &mut HashMap<EntryName, Entry>,
+		_is_dir: bool,
 	) -> OperationResult<CreateFileInfo<EntryHandle>> {
-		/*
-		if attrs & winnt::FILE_ATTRIBUTE_READONLY > 0 && delete_on_close {
-			return Err(STATUS_CANNOT_DELETE);
-		}
-		let mut stat = Stat::new(
-			self.next_id(),
-			attrs,
-			SecurityDescriptor::new_inherited(
-				&parent.stat.read().unwrap().sec_desc,
-				creator_desc,
-				token,
-				is_dir,
-			)?,
-			Arc::downgrade(&parent),
-		);
-		let stream = if let Some(stream_info) = &name.stream_info {
-			if stream_info.check_default(is_dir)? {
-				None
-			} else {
-				None
-			}
-		} else {
-			None
-		};
-		let entry = if is_dir {
-			Entry::Directory(Arc::new(DirEntry::new(stat)))
-		} else {
-			Entry::File(Arc::new(FileEntry::new(stat)))
-		};
-		assert!(children
-			.insert(EntryName(name.file_name.to_owned()), entry.clone())
-			.is_none());
-		parent.stat.write().unwrap().update_mtime(SystemTime::now());
-		let is_dir = is_dir && stream.is_some();
-		Ok(CreateFileInfo {
-			context: EntryHandle::new(entry, delete_on_close),
-			is_dir,
-			new_file_created: true,
-		})*/
 		Err(STATUS_ACCESS_DENIED)
 	}
 }
@@ -677,7 +615,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 		offset: i64,
 		buffer: &mut [u8],
 		_info: &OperationInfo<'c, 'h, Self>,
-		context: &'c Self::Context,
+		_context: &'c Self::Context,
 	) -> OperationResult<u32> {
 
 		let mut url: Option<String> = None;
@@ -722,10 +660,10 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	fn write_file(
 		&'h self,
 		_file_name: &U16CStr,
-		offset: i64,
-		buffer: &[u8],
-		info: &OperationInfo<'c, 'h, Self>,
-		context: &'c Self::Context,
+		_offset: i64,
+		_buffer: &[u8],
+		_info: &OperationInfo<'c, 'h, Self>,
+		_context: &'c Self::Context,
 	) -> OperationResult<u32> {
 		Err(STATUS_ACCESS_DENIED)
 	}
@@ -774,7 +712,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 
 			// root directory should only display artists
 			if file_name.to_string().unwrap() == "\\" {
-				for (artist, albums) in &self.info.desired_folders {
+				for (artist, _albums) in &self.info.desired_folders {
 					let stat = Stat::new(1, 0, SecurityDescriptor::new_default().unwrap(), Arc::<DirEntry>::downgrade(&dir)).into();
 					let artist_children: HashMap<EntryName, Entry> = HashMap::new();
 					let artist_dir_entry: DirEntry = DirEntry {
@@ -897,7 +835,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	fn delete_file(
 		&'h self,
 		_file_name: &U16CStr,
-		info: &OperationInfo<'c, 'h, Self>,
+		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
 		if context.entry.stat().read().unwrap().attrs.value & winnt::FILE_ATTRIBUTE_READONLY > 0 {
@@ -909,10 +847,10 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	fn delete_directory(
 		&'h self,
 		_file_name: &U16CStr,
-		info: &OperationInfo<'c, 'h, Self>,
+		_info: &OperationInfo<'c, 'h, Self>,
 		context: &'c Self::Context,
 	) -> OperationResult<()> {
-		if let Entry::Directory(dir) = &context.entry {
+		if let Entry::Directory(_dir) = &context.entry {
 			Ok(())
 		} else {
 			Err(STATUS_INVALID_DEVICE_REQUEST)
@@ -921,11 +859,11 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 
 	fn move_file(
 		&'h self,
-		file_name: &U16CStr,
-		new_file_name: &U16CStr,
-		replace_if_existing: bool,
+		_file_name: &U16CStr,
+		_new_file_name: &U16CStr,
+		_replace_if_existing: bool,
 		_info: &OperationInfo<'c, 'h, Self>,
-		context: &'c Self::Context,
+		_context: &'c Self::Context,
 	) -> OperationResult<()> {
 		Ok(())
 	}
@@ -933,9 +871,9 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	fn set_end_of_file(
 		&'h self,
 		_file_name: &U16CStr,
-		offset: i64,
+		_offset: i64,
 		_info: &OperationInfo<'c, 'h, Self>,
-		context: &'c Self::Context,
+		_context: &'c Self::Context,
 	) -> OperationResult<()> {
 		Ok(())
 	}
@@ -943,9 +881,9 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for SubFSHandler {
 	fn set_allocation_size(
 		&'h self,
 		_file_name: &U16CStr,
-		alloc_size: i64,
+		_alloc_size: i64,
 		_info: &OperationInfo<'c, 'h, Self>,
-		context: &'c Self::Context,
+		_context: &'c Self::Context,
 	) -> OperationResult<()> {
 		Ok(())
 	}

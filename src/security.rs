@@ -2,7 +2,7 @@ use std::{mem, pin::Pin, ptr};
 
 use dokan::{map_win32_error_to_ntstatus, win32_ensure, OperationResult};
 use winapi::{
-	shared::{minwindef, ntdef, ntstatus::*, winerror},
+	shared::{minwindef, ntstatus::*, winerror},
 	um::{errhandlingapi::GetLastError, heapapi, securitybaseapi, winnt},
 };
 
@@ -11,11 +11,6 @@ struct PrivateObjectSecurity {
 	value: winnt::PSECURITY_DESCRIPTOR,
 }
 
-impl PrivateObjectSecurity {
-	unsafe fn from_raw(ptr: winnt::PSECURITY_DESCRIPTOR) -> Self {
-		Self { value: ptr }
-	}
-}
 
 impl Drop for PrivateObjectSecurity {
 	fn drop(&mut self) {
@@ -129,44 +124,6 @@ const FILE_GENERIC_MAPPING: winnt::GENERIC_MAPPING = winnt::GENERIC_MAPPING {
 };
 
 impl SecurityDescriptor {
-	pub fn new_inherited(
-		parent_desc: &SecurityDescriptor,
-		creator_desc: winnt::PSECURITY_DESCRIPTOR,
-		token: ntdef::HANDLE,
-		is_dir: bool,
-	) -> OperationResult<Self> {
-		unsafe {
-			if !creator_desc.is_null()
-				&& securitybaseapi::IsValidSecurityDescriptor(creator_desc) == minwindef::FALSE
-			{
-				return Err(STATUS_INVALID_PARAMETER);
-			}
-
-			let mut priv_desc = ptr::null_mut();
-			win32_ensure(
-				securitybaseapi::CreatePrivateObjectSecurity(
-					parent_desc.desc_ptr,
-					creator_desc,
-					&mut priv_desc,
-					is_dir as minwindef::BOOL,
-					token,
-					&FILE_GENERIC_MAPPING as *const _ as *mut _,
-				) == minwindef::TRUE,
-			)?;
-
-			let priv_desc = PrivateObjectSecurity::from_raw(priv_desc);
-
-			let heap = heapapi::GetProcessHeap();
-			win32_ensure(!heap.is_null())?;
-
-			let len = securitybaseapi::GetSecurityDescriptorLength(priv_desc.value) as usize;
-			let buf = heapapi::HeapAlloc(heap, 0, len);
-			win32_ensure(!buf.is_null())?;
-
-			ptr::copy_nonoverlapping(priv_desc.value as *const u8, buf as *mut _, len);
-			Ok(Self { desc_ptr: buf })
-		}
-	}
 
 	pub fn new_default() -> OperationResult<Self> {
 		let owner_sid = Pin::new(get_well_known_sid(winnt::WinLocalSystemSid)?);
@@ -289,13 +246,4 @@ impl Drop for SecurityDescriptor {
 			heapapi::HeapFree(heapapi::GetProcessHeap(), 0, self.desc_ptr);
 		}
 	}
-}
-
-pub fn my_token() -> ntdef::HANDLE {
-	let mut h_token: ntdef::HANDLE = winapi::shared::ntdef::NULL;
-	unsafe {
-		let h_proc: ntdef::HANDLE = winapi::um::processthreadsapi::OpenProcess(winapi::um::winnt::PROCESS_QUERY_INFORMATION, 0, std::process::id());
-		winapi::um::processthreadsapi::OpenProcessToken(h_proc, 268435456, &mut h_token);
-	}
-	return h_token;
 }

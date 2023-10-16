@@ -22,29 +22,6 @@ pub struct StreamInfo<'a> {
 	pub type_: StreamType,
 }
 
-impl StreamInfo<'_> {
-	pub fn check_default(&self, is_dir: bool) -> OperationResult<bool> {
-		if is_dir {
-			if self.name.is_empty()
-				|| EntryNameRef::new(self.name) == EntryName(U16String::from_str("$I30")).borrow()
-			{
-				if self.type_ == StreamType::IndexAllocation {
-					Ok(true)
-				} else {
-					Err(STATUS_OBJECT_NAME_INVALID)
-				}
-			} else if self.type_ == StreamType::Data {
-				Ok(false)
-			} else {
-				Err(STATUS_OBJECT_NAME_INVALID)
-			}
-		} else if self.type_ == StreamType::Data {
-			Ok(self.name.is_empty())
-		} else {
-			Err(STATUS_OBJECT_NAME_INVALID)
-		}
-	}
-}
 
 #[derive(Debug)]
 pub struct FullName<'a> {

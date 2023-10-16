@@ -1,6 +1,5 @@
-use sunk::collections::album;
 use sunk::song::Song;
-use sunk::{Album, Artist, Client, Streamable, ListType, search::ALL};
+use sunk::{Album, Client, Streamable, ListType, search::ALL};
 
 pub fn client(site: &str, username: &str, password: &str) -> Client {
     Client::new(site, username, password).unwrap()
